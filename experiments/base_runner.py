@@ -267,10 +267,12 @@ class BaseExperimentRunner(ABC):
         return args
 
     def run_subprocess_with_gpu(self, cmd: List[str], gpu_id: str,
-                                 job_name: str = "") -> Tuple[int, str, str]:
+                                 job_name: str = "", stream_output: bool = True) -> Tuple[int, str, str]:
         """
-        GPU를 할당받아 subprocess 실행
+        GPU를 할당받아 subprocess 실행 (실시간 출력 지원)
         Returns: (return_code, stdout, stderr)
+
+        return_code = -9 는 OOM (SIGKILL)을 의미
         """
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = gpu_id
@@ -283,48 +285,95 @@ class BaseExperimentRunner(ABC):
         self.log(f"[GPU {gpu_id}] 시작: {job_name}")
         start_time = time.time()
 
+        stdout_lines = []
+        stderr_lines = []
+
         try:
-            result = subprocess.run(
+            # 실시간 출력을 위해 Popen 사용
+            process = subprocess.Popen(
                 cmd,
                 cwd=str(Path(__file__).parent.parent),
                 env=env,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=7200  # 2시간 타임아웃
+                bufsize=1  # 라인 버퍼링
             )
 
+            # stdout과 stderr를 동시에 읽기 위한 스레드
+            def read_stream(stream, lines_list, prefix, is_stderr=False):
+                for line in iter(stream.readline, ''):
+                    if line:
+                        lines_list.append(line)
+                        # 실시간 출력 (중요한 정보만)
+                        if stream_output:
+                            line_stripped = line.strip()
+                            # 진행률, 에포크, 평가 결과 등 중요한 정보 출력
+                            if any(kw in line_stripped.lower() for kw in
+                                   ['epoch', 'eval', 'accuracy', 'loss', 'result',
+                                    'error', 'oom', 'cuda', 'memory', '%|']):
+                                with self.progress_lock:
+                                    print(f"  [{gpu_id}|{job_name}] {line_stripped}")
+                stream.close()
+
+            stdout_thread = threading.Thread(target=read_stream,
+                                            args=(process.stdout, stdout_lines, "OUT"))
+            stderr_thread = threading.Thread(target=read_stream,
+                                            args=(process.stderr, stderr_lines, "ERR", True))
+
+            stdout_thread.start()
+            stderr_thread.start()
+
+            # 프로세스 완료 대기 (2시간 타임아웃)
+            try:
+                process.wait(timeout=7200)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                stdout_thread.join(timeout=5)
+                stderr_thread.join(timeout=5)
+                self.log(f"[GPU {gpu_id}] 타임아웃: {job_name}", "ERROR")
+                return -1, "", "Timeout"
+
+            stdout_thread.join()
+            stderr_thread.join()
+
             elapsed = time.time() - start_time
+            stdout_text = ''.join(stdout_lines)
+            stderr_text = ''.join(stderr_lines)
 
             # 로그 파일에 출력 저장
             with open(log_file, 'w', encoding='utf-8') as f:
                 f.write(f"=== Command ===\n{' '.join(cmd)}\n\n")
                 f.write(f"=== GPU: {gpu_id} ===\n")
+                f.write(f"=== Return Code: {process.returncode} ===\n")
                 f.write(f"=== Elapsed: {elapsed:.1f}s ===\n\n")
-                f.write(f"=== STDOUT ===\n{result.stdout}\n\n")
-                f.write(f"=== STDERR ===\n{result.stderr}\n")
+                f.write(f"=== STDOUT ===\n{stdout_text}\n\n")
+                f.write(f"=== STDERR ===\n{stderr_text}\n")
 
-            if result.returncode == 0:
+            if process.returncode == 0:
                 self.log(f"[GPU {gpu_id}] 완료: {job_name} ({elapsed:.1f}s)")
+            elif process.returncode == -9:
+                self.log(f"[GPU {gpu_id}] OOM (SIGKILL): {job_name}", "ERROR")
             else:
-                self.log(f"[GPU {gpu_id}] 실패: {job_name} (code={result.returncode})", "ERROR")
+                self.log(f"[GPU {gpu_id}] 실패: {job_name} (code={process.returncode})", "ERROR")
 
-            return result.returncode, result.stdout, result.stderr
+            return process.returncode, stdout_text, stderr_text
 
-        except subprocess.TimeoutExpired:
-            self.log(f"[GPU {gpu_id}] 타임아웃: {job_name}", "ERROR")
-            return -1, "", "Timeout"
         except Exception as e:
             self.log(f"[GPU {gpu_id}] 에러: {job_name} - {e}", "ERROR")
             return -1, "", str(e)
 
     def execute_parallel_jobs(self, jobs: List[Dict[str, Any]],
-                               job_executor: callable) -> List[Any]:
+                               job_executor: callable,
+                               max_retries: int = 1) -> List[Any]:
         """
-        여러 작업을 병렬로 실행
+        여러 작업을 병렬로 실행 (OOM 발생 시 재시도 큐 지원)
 
         Args:
             jobs: 각 작업의 파라미터 딕셔너리 리스트
             job_executor: 각 작업을 실행하는 함수 (gpu_id, **job_params) -> result
+                         result에 "oom" 키가 True이면 재시도 큐에 추가
+            max_retries: OOM 발생 시 최대 재시도 횟수
 
         Returns:
             각 작업의 결과 리스트
@@ -333,20 +382,32 @@ class BaseExperimentRunner(ABC):
         self.completed_count = 0
         results = [None] * len(jobs)
 
+        # 재시도 큐 관리
+        retry_queue = queue.Queue()
+        retry_counts = {i: 0 for i in range(len(jobs))}
+        oom_jobs = []  # OOM으로 실패한 작업 목록
+
         self.log(f"{'='*60}")
         self.log(f" 병렬 실행 시작: {len(jobs)}개 작업")
         self.log(f" GPUs: {self.gpus} | Per GPU Tasks: {self.per_gpu_tasks}")
         self.log(f" 최대 동시 실행: {self.gpu_pool.get_max_workers()}개")
+        self.log(f" OOM 재시도 횟수: {max_retries}")
         self.log(f"{'='*60}")
 
-        def worker(idx: int, job_params: dict):
+        def worker(idx: int, job_params: dict, is_retry: bool = False):
             gpu_id = self.gpu_pool.acquire()
+            retry_info = f" (재시도 {retry_counts[idx]})" if is_retry else ""
             try:
                 result = job_executor(gpu_id, **job_params)
-                return idx, result
+
+                # OOM 체크 (result가 dict이고 oom=True인 경우)
+                if isinstance(result, dict) and result.get("oom", False):
+                    return idx, result, True  # OOM 플래그
+                return idx, result, False
             finally:
                 self.gpu_pool.release(gpu_id)
 
+        # 첫 번째 실행
         with ThreadPoolExecutor(max_workers=self.gpu_pool.get_max_workers()) as executor:
             futures = {
                 executor.submit(worker, idx, job): idx
@@ -355,15 +416,53 @@ class BaseExperimentRunner(ABC):
 
             for future in as_completed(futures):
                 try:
-                    idx, result = future.result()
-                    results[idx] = result
+                    idx, result, is_oom = future.result()
+
+                    if is_oom and retry_counts[idx] < max_retries:
+                        # OOM 발생 - 재시도 큐에 추가
+                        retry_counts[idx] += 1
+                        retry_queue.put((idx, jobs[idx]))
+                        oom_jobs.append(idx)
+                        self.log(f"[OOM] 작업 {idx} 재시도 큐에 추가 (시도 {retry_counts[idx]}/{max_retries})", "WARN")
+                    else:
+                        results[idx] = result
                 except Exception as e:
                     idx = futures[future]
                     self.log(f"작업 {idx} 실패: {e}", "ERROR")
                     results[idx] = None
 
+        # 재시도 큐 처리 (한 번에 하나씩 순차 실행)
+        if not retry_queue.empty():
+            self.log(f"\n{'='*60}")
+            self.log(f" OOM 재시도 큐 처리 시작: {retry_queue.qsize()}개 작업")
+            self.log(f"{'='*60}")
+
+            while not retry_queue.empty():
+                idx, job_params = retry_queue.get()
+                self.log(f"[재시도] 작업 {idx}: {job_params}")
+
+                # 순차 실행 (동시에 하나만)
+                gpu_id = self.gpu_pool.acquire()
+                try:
+                    result = job_executor(gpu_id, **job_params)
+
+                    if isinstance(result, dict) and result.get("oom", False):
+                        if retry_counts[idx] < max_retries:
+                            retry_counts[idx] += 1
+                            retry_queue.put((idx, job_params))
+                            self.log(f"[OOM] 작업 {idx} 다시 재시도 큐에 추가", "WARN")
+                        else:
+                            self.log(f"[OOM] 작업 {idx} 최대 재시도 횟수 초과", "ERROR")
+                            results[idx] = result
+                    else:
+                        results[idx] = result
+                finally:
+                    self.gpu_pool.release(gpu_id)
+
         self.log(f"{'='*60}")
         self.log(f" 병렬 실행 완료: {self.completed_count}/{self.total_count} 성공")
+        if oom_jobs:
+            self.log(f" OOM 발생 작업: {oom_jobs}")
         self.log(f"{'='*60}")
 
         return results

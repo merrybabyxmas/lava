@@ -277,8 +277,12 @@ def main(args):
             max_length=128,
         )
 
-    encoded = raw.map(preprocess, batched=True)
-    encoded = encoded.rename_column("label", "labels")
+    encoded = raw.map(
+        preprocess, 
+        batched=True, 
+        keep_in_memory=True,  # 디스크 캐시 생성 방지
+        load_from_cache_file=False # 기존 캐시 무시
+    )    encoded = encoded.rename_column("label", "labels")
     encoded.set_format(
         type="torch",
         columns=["input_ids", "attention_mask", "labels"],

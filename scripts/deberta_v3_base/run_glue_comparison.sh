@@ -39,7 +39,7 @@ WANDB_PROJECT="GLUE-Comparison"
 
 TEST_MODE=false
 
-cd /home/dongwoo39/PiSSA_NLU
+cd /home/dongwoo39/LAVA
 
 echo "============================================================"
 echo " GLUE Comparison 실험"

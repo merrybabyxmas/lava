@@ -83,9 +83,11 @@ IMG_TASK_META = {
         split_val="test"
     ),
     "sun397": dict(
-        source="torchvision",
-        tv_class=tv_datasets.SUN397,
+        source="huggingface",
+        dataset_name="tanganke/sun397",
         num_labels=397,
+        split_train="train",
+        split_val="test"
     ),
     "svhn": dict(
         source="torchvision",
@@ -172,11 +174,30 @@ class BestMetricCallback(TrainerCallback):
         self.best_accuracy = 0.0
 
     def on_evaluate(self, args, state, control, metrics=None, **kwargs):
-        if metrics and "eval_accuracy" in metrics:
-            current = metrics["eval_accuracy"]
-            if current > self.best_accuracy:
-                self.best_accuracy = current
-            wandb.log({"eval/best_accuracy": self.best_accuracy}, step=state.global_step)
+        epoch = int(state.epoch) if state.epoch else 0
+        if metrics:
+            # eval_accuracy 또는 accuracy 키 확인
+            current = metrics.get("eval_accuracy", metrics.get("accuracy"))
+            if current is not None:
+                is_best = current > self.best_accuracy
+                if is_best:
+                    self.best_accuracy = current
+                print(f"[EVAL] Epoch {epoch}: Accuracy = {current:.4f} | Best = {self.best_accuracy:.4f}" + (" *" if is_best else ""))
+                wandb.log({"eval/best_accuracy": self.best_accuracy}, step=state.global_step)
+            else:
+                # accuracy가 없으면 loss만 출력
+                loss = metrics.get("eval_loss", 0)
+                print(f"[EVAL] Epoch {epoch}: Loss = {loss:.4f}")
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        print("[TRAIN] Training started...")
+
+    def on_epoch_begin(self, args, state, control, **kwargs):
+        epoch = int(state.epoch) if state.epoch else 0
+        print(f"[TRAIN] Epoch {epoch + 1}/{int(args.num_train_epochs)} starting...")
+
+    def on_train_end(self, args, state, control, **kwargs):
+        print(f"[TRAIN] Training completed. Best accuracy: {self.best_accuracy:.4f}")
 
 
 # ============================================================
@@ -196,7 +217,10 @@ class StabilityViTTrainer(Trainer):
             return super().compute_loss(model, inputs, return_outputs)
 
         labels = inputs["labels"]
-        concat_inputs = {k: torch.cat([v, v], dim=0) for k, v in inputs.items() if isinstance(v, torch.Tensor)}
+        # ViT는 pixel_values와 labels만 필요 (input_ids 등 텍스트 관련 키 제외)
+        vit_keys = {"pixel_values", "labels"}
+        concat_inputs = {k: torch.cat([v, v], dim=0) for k, v in inputs.items()
+                        if isinstance(v, torch.Tensor) and k in vit_keys}
 
         outputs = model(**concat_inputs)
         logits = outputs.logits
@@ -232,7 +256,7 @@ class StabilityViTTrainer(Trainer):
         return (loss, outputs) if return_outputs else loss
 
 
-def build_adapter(adapter_type, r=8, alpha=8):
+def build_adapter(adapter_type, r=8, alpha=8, total_step=None):
     at = adapter_type.lower()
     target_modules = ["query", "key", "value", "dense"]
 
@@ -245,7 +269,14 @@ def build_adapter(adapter_type, r=8, alpha=8):
         return LoraConfig(**kwargs)
 
     if at == "adalora":
-        return AdaLoraConfig(r=r, lora_alpha=alpha, target_modules=target_modules)
+        # AdaLoRA requires total_step for rank scheduling
+        return AdaLoraConfig(
+            init_r=r,
+            target_r=r // 2,  # final rank
+            lora_alpha=alpha,
+            target_modules=target_modules,
+            total_step=total_step if total_step else 1000,
+        )
 
     if at == "lava":
         return LavaConfig(r=r, alpha=alpha, target_modules=target_modules)
@@ -291,14 +322,34 @@ def main(args):
         images = examples["image"]
         images = [img.convert("RGB") for img in images]
         inputs = processor(images, return_tensors="pt")
-        inputs["labels"] = examples["label"]
-        return inputs
+        # ViT에 필요한 pixel_values와 labels만 반환
+        return {
+            "pixel_values": inputs["pixel_values"],
+            "labels": examples["label"]
+        }
 
-    train_ds = raw[split_train].map(preprocess, batched=True, remove_columns=raw[split_train].column_names)
-    val_ds = raw[split_val].map(preprocess, batched=True, remove_columns=raw[split_val].column_names)
-
+    # 데이터 전처리 (keep_in_memory=False로 디스크 캐시 사용하여 RAM 절약)
+    train_ds = raw[split_train].map(
+        preprocess,
+        batched=True,
+        remove_columns=raw[split_train].column_names,
+        keep_in_memory=False,  # 디스크에 캐시하여 메모리 사용 줄이기
+        load_from_cache_file=True,  # 캐시 활용
+        batch_size=100,  # 작은 배치로 메모리 사용 줄이기
+    )
+    val_ds = raw[split_val].map(
+        preprocess,
+        batched=True,
+        remove_columns=raw[split_val].column_names,
+        keep_in_memory=False,
+        load_from_cache_file=True,
+        batch_size=100,
+    )
     train_ds.set_format("torch")
     val_ds.set_format("torch")
+
+    # AdaLoRA를 위한 total_step 계산
+    total_step = (len(train_ds) // batch) * epochs
 
     # Adapter 적용
     if adapter_type == "bitfit":
@@ -308,13 +359,62 @@ def main(args):
                 param.requires_grad = True
             else:
                 param.requires_grad = False
+    elif adapter_type.lower() == "pissa":
+        # PiSSA precompute 로직: SVD 계산 결과를 캐시하여 재사용
+        peft_cfg = build_adapter(adapter_type, r=args.r, alpha=args.alpha, total_step=total_step)
+
+        cache_dir = ".precomputed"
+        os.makedirs(cache_dir, exist_ok=True)
+
+        # ViT 모델명과 Rank를 조합해 고유 파일명 생성
+        model_name_safe = "vit-base-patch16-224"
+        cache_path = os.path.join(cache_dir, f"{model_name_safe}_r{args.r}.pt")
+
+        if os.path.exists(cache_path):
+            print(f"[*] Found precomputed PiSSA weights at {cache_path}. Loading...")
+            # 캐시가 있으면 SVD 연산을 건너뜀
+            peft_cfg.init_lora_weights = False
+            model = get_peft_model(base, peft_cfg)
+
+            # 저장된 PiSSA 가중치 로드
+            checkpoint = torch.load(cache_path, map_location="cpu")
+            model.load_state_dict(checkpoint, strict=False)
+            print(f"[*] PiSSA initialization loaded from cache.")
+        else:
+            print(f"[*] No precomputed weights found. Computing PiSSA SVD (this may take a while)...")
+            peft_cfg.init_lora_weights = "pissa"
+            model = get_peft_model(base, peft_cfg)
+
+            # 초기화된 가중치 저장 (lora_A, lora_B 및 수정된 base_layer)
+            to_save = {}
+            for name, param in model.named_parameters():
+                if "lora_" in name or any(tm in name for tm in peft_cfg.target_modules):
+                    if param.requires_grad or "base_layer" in name:
+                        to_save[name] = param.cpu().detach()
+
+            # base_layer 가중치도 저장 (PiSSA에서 수정됨)
+            for name, module in model.named_modules():
+                if hasattr(module, 'base_layer') and hasattr(module.base_layer, 'weight'):
+                    to_save[f"{name}.base_layer.weight"] = module.base_layer.weight.cpu().detach()
+
+            torch.save(to_save, cache_path)
+            print(f"[*] PiSSA SVD computation finished and saved to {cache_path}")
     else:
-        peft_cfg = build_adapter(adapter_type, r=args.r, alpha=args.alpha)
+        peft_cfg = build_adapter(adapter_type, r=args.r, alpha=args.alpha, total_step=total_step)
         model = get_peft_model(base, peft_cfg)
 
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in model.parameters())
-    print(f"Trainable: {trainable:,} / {total:,} ({100*trainable/total:.4f}%)")
+
+    print("=" * 60)
+    print(f"[CONFIG] Task: {task} | Adapter: {adapter_type}")
+    print(f"[CONFIG] Seed: {args.seed} | Epochs: {epochs} | Batch: {batch} | LR: {lr}")
+    print(f"[CONFIG] Rank: {args.r} | Alpha: {args.alpha}")
+    if adapter_type == "lava":
+        print(f"[CONFIG] Lambda VIB: {args.lambda_vib} | Stab: {args.lambda_stab} | Latent: {args.lambda_latent_stability}")
+    print(f"[MODEL] Trainable: {trainable:,} / {total:,} ({100*trainable/total:.4f}%)")
+    print(f"[DATA] Train: {len(train_ds)} | Val: {len(val_ds)}")
+    print("=" * 60)
 
     def compute_metrics(eval_pred):
         preds, labels = eval_pred
@@ -341,7 +441,13 @@ def main(args):
         max_grad_norm=args.max_grad_norm,
         report_to="wandb",
         seed=args.seed,
-        logging_steps=50,
+        logging_steps=10,
+        logging_first_step=True,
+        disable_tqdm=False,
+        log_level="info",
+        label_names=["labels"],  # compute_metrics 호출을 위해 명시적으로 설정
+        dataloader_num_workers=0,  # 메모리 사용 줄이기 (multiprocessing 비활성화)
+        dataloader_pin_memory=False,  # RAM 메모리 사용 줄이기
     )
 
     callback = BestMetricCallback()
@@ -387,7 +493,7 @@ def main(args):
 
     result_file = os.path.join(
         result_dir,
-        f"img_result_{task}_s{args.seed}_vib{args.lambda_vib}_stab{args.lambda_stab}_lat{args.lambda_latent_stability}.json"
+        f"img_result_{adapter_type}_{task}_r{args.r}_s{args.seed}.json"
     )
 
     with open(result_file, "w") as f:
@@ -401,7 +507,14 @@ def main(args):
             "lambda_latent_stability": args.lambda_latent_stability,
         }, f, indent=2)
 
-    print(f"\n[RESULT] Task: {task}, Best Accuracy: {best_acc:.4f}" if best_acc else f"\n[RESULT] No valid metric")
+    print("=" * 60)
+    if best_acc is not None:
+        print(f"[RESULT] Task: {task} | Adapter: {adapter_type}")
+        print(f"[RESULT] Best Accuracy: {best_acc:.4f}")
+    else:
+        print(f"[RESULT] No valid metric")
+    print(f"[RESULT] Saved to: {result_file}")
+    print("=" * 60)
 
     if os.path.exists(tmp_dir):
         shutil.rmtree(tmp_dir)

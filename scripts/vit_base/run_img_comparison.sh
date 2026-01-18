@@ -15,18 +15,20 @@ export NCCL_IB_DISABLE=1
 
 # GPU 설정 (병렬 실행)
 GPUS="0,1,2,3"           # 사용할 GPU ID (예: "0,1,2,3")
-PER_GPU_TASKS=1      # GPU당 동시 실행 작업 수
+PER_GPU_TASKS=4      # GPU당 동시 실행 작업 수 (RAM 메모리 절약을 위해 1로 설정)
 
 # 실험 설정
 SEEDS="1,2,42"
-TASKS="dtd,eurosat,gtsrb,resisc45,sun397,svhn"
-# TASKS="dtd,eurosat"  # 빠른 테스트용
-METHODS="bitfit,lora,adalora,dora,pissa,lava"
+# TASKS="dtd,eurosat,gtsrb,resisc45,sun397,svhn"
+TASKS="dtd"  # 빠른 테스트용
+# METHODS="bitfit,lora,adalora,dora,pissa,lava"
+METHODS="lava"
+
 
 # Training Parameters
 LR=1e-4
 BATCH_SIZE=32
-EPOCHS=30
+EPOCHS=1
 WEIGHT_DECAY=0.01
 WARMUP_RATIO=0.1
 
@@ -40,7 +42,7 @@ WANDB_PROJECT="IMG-Comparison"
 
 TEST_MODE=false
 
-cd /home/dongwoo39/PiSSA_NLU
+cd /home/dongwoo39/LAVA
 
 echo "============================================================"
 echo " Image Classification Comparison 실험"

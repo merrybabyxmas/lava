@@ -38,7 +38,7 @@ WANDB_PROJECT="IMG-Ablation"
 
 TEST_MODE=false
 
-cd /home/dongwoo39/PiSSA_NLU
+cd /home/dongwoo39/LAVA
 
 echo "============================================================"
 echo " Image Classification Ablation 실험"

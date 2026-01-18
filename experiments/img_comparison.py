@@ -60,8 +60,12 @@ class ImageComparisonRunner(BaseExperimentRunner):
         return self._tasks
 
     def run_single_experiment(self, method: str, task: str, seed: int,
-                               gpu_id: str = None) -> float:
-        """단일 실험 실행 (GPU ID 지정 가능)"""
+                               gpu_id: str = None) -> dict:
+        """단일 실험 실행 (GPU ID 지정 가능)
+
+        Returns:
+            dict: {"score": float, "oom": bool, "method": str, "task": str, "seed": int}
+        """
         cmd = [
             "python", "train_vit.py",
             "--adapter", method,
@@ -70,37 +74,39 @@ class ImageComparisonRunner(BaseExperimentRunner):
         ] + self.build_training_args(method)
 
         job_name = f"{method}_{task}_s{seed}"
+        result = {"method": method, "task": task, "seed": seed, "score": 0.0, "oom": False}
 
         if self.test_mode:
-            dummy = self.get_dummy_result()
+            result["score"] = self.get_dummy_result()
             time.sleep(0.5)
             self.update_progress(job_name)
-            return dummy
+            return result
 
         use_gpu = gpu_id if gpu_id else self.gpus
         ret_code, stdout, stderr = self.run_subprocess_with_gpu(cmd, use_gpu, job_name)
 
-        if ret_code != 0:
-            return 0.0
+        # OOM 감지 (SIGKILL = -9)
+        if ret_code == -9:
+            result["oom"] = True
+            self.log(f"[OOM] {job_name} - GPU {use_gpu}에서 OOM 발생", "WARN")
+            return result
 
-        lv = self.lava_config
-        if method == "lava":
-            result_file = self.result_dir / f"img_result_{task}_s{seed}_vib{lv.lambda_vib}_stab{lv.lambda_stab}_lat{lv.lambda_latent_stability}.json"
-        else:
-            result_file = self.result_dir / f"img_result_{task}_s{seed}_vib1.0_stab0.1_lat1.0.json"
+        if ret_code != 0:
+            return result
+
+        # 결과 파일 경로 수정: train_vit.py에서 저장하는 형식에 맞춤
+        result_file = self.result_dir / f"img_result_{method}_{task}_r{self.lora_config.r}_s{seed}.json"
 
         if result_file.exists():
             with open(result_file, 'r') as f:
                 data = json.load(f)
-                score = data.get("best_accuracy", 0.0)
-                self.update_progress(f"{job_name} = {score:.4f}")
-                return score
-        return 0.0
+                result["score"] = data.get("best_accuracy", 0.0)
+                self.update_progress(f"{job_name} = {result['score']:.4f}")
+        return result
 
     def _job_executor(self, gpu_id: str, method: str, task: str, seed: int) -> dict:
-        """병렬 작업 실행기"""
-        score = self.run_single_experiment(method, task, seed, gpu_id)
-        return {"method": method, "task": task, "seed": seed, "score": score}
+        """병렬 작업 실행기 (OOM 플래그 포함)"""
+        return self.run_single_experiment(method, task, seed, gpu_id)
 
     def get_params_percentage(self, method: str) -> str:
         """메소드별 파라미터 비율 (ViT-B/16 기준)"""
@@ -141,7 +147,7 @@ class ImageComparisonRunner(BaseExperimentRunner):
         # 결과 집계 (method -> task -> [scores])
         method_results = defaultdict(lambda: defaultdict(list))
         for res in results:
-            if res:
+            if res and not res.get("oom", False) and res.get("score", 0) > 0:
                 method_results[res["method"]][res["task"]].append(res["score"])
 
         # CSV에 메소드별 결과 기록
