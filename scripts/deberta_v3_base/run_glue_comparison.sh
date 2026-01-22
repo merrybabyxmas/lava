@@ -14,7 +14,7 @@ export PYTHONUNBUFFERED=1
 # ============================================================
 
 # GPU 설정 (병렬 실행)
-GPUS="0,1"           # 사용할 GPU ID (예: "0,1,2,3")
+GPUS="0"           # 사용할 GPU ID (예: "0,1,2,3")
 PER_GPU_TASKS=3      # GPU당 동시 실행 작업 수 (총 동시 실행: GPU수 x PER_GPU_TASKS)
 
 # 실험 설정

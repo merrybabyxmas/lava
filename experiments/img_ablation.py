@@ -80,7 +80,11 @@ class ImageAblationRunner(BaseExperimentRunner):
             "--lambda_vib", str(vib),
             "--lambda_stab", str(logit_stab),
             "--lambda_latent_stability", str(latent_stab),
+            "--wandb_project", self.wandb_project,
         ]
+
+        if not self.use_wandb:
+            cmd.append("--no_wandb")
 
         job_name = f"lava_{task}_s{seed}_vib{vib}_stab{logit_stab}_lat{latent_stab}"
 

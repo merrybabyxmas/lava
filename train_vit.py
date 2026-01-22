@@ -38,6 +38,15 @@ from trainer import LavaViTTrainer, setup_seed, register_lava, BestMetricCallbac
 register_lava()
 
 
+def worker_init_fn(worker_id):
+    """DataLoader worker의 시드를 고정하여 재현성 보장"""
+    import numpy as np
+    import random
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
 # ============================================================
 # 데이터셋 설정
 # ============================================================
@@ -318,7 +327,17 @@ def main(args):
         return {"accuracy": acc}
 
     run_name = f"{adapter_type}_{task}_r{args.r}_s{args.seed}"
-    wandb.init(project="ViT-ImageClassification", name=run_name, config=vars(args))
+
+    # Wandb 설정
+    if hasattr(args, 'no_wandb') and args.no_wandb:
+        wandb_mode = "disabled"
+        report_to = "none"
+    else:
+        wandb_mode = "online"
+        report_to = "wandb"
+
+    wandb_project = getattr(args, 'wandb_project', "ViT-ImageClassification")
+    wandb.init(project=wandb_project, name=run_name, config=vars(args), mode=wandb_mode)
 
     tmp_dir = tempfile.mkdtemp()
 
@@ -334,14 +353,14 @@ def main(args):
         warmup_ratio=args.warmup_ratio,
         lr_scheduler_type=args.lr_scheduler,
         max_grad_norm=args.max_grad_norm,
-        report_to="wandb",
+        report_to=report_to,
         seed=args.seed,
         logging_steps=10,
         logging_first_step=True,
         disable_tqdm=False,
         log_level="info",
         label_names=["labels"],  # compute_metrics 호출을 위해 명시적으로 설정
-        dataloader_num_workers=4,  # 메모리 사용 줄이기 (multiprocessing 비활성화)
+        dataloader_num_workers=0,  # 시드 재현성을 위해 메인 프로세스에서 로드
         dataloader_pin_memory=False,  # RAM 메모리 사용 줄이기
     )
 
@@ -386,10 +405,17 @@ def main(args):
     result_dir = os.path.join(os.path.dirname(__file__), "results")
     os.makedirs(result_dir, exist_ok=True)
 
-    result_file = os.path.join(
-        result_dir,
-        f"img_result_{adapter_type}_{task}_r{args.r}_s{args.seed}.json"
-    )
+    # LAVA ablation 실험용 파일명 (lambda 값 포함)
+    if adapter_type == "lava":
+        result_file = os.path.join(
+            result_dir,
+            f"img_result_{task}_s{args.seed}_vib{args.lambda_vib}_stab{args.lambda_stab}_lat{args.lambda_latent_stability}.json"
+        )
+    else:
+        result_file = os.path.join(
+            result_dir,
+            f"img_result_{adapter_type}_{task}_r{args.r}_s{args.seed}.json"
+        )
 
     with open(result_file, "w") as f:
         json.dump({
@@ -446,6 +472,10 @@ if __name__ == "__main__":
     parser.add_argument("--latent_dim", type=int, default=16, help="LAVA latent dimension")
     parser.add_argument("--kl_annealing", action="store_true", help="Enable KL annealing")
     parser.add_argument("--noise_scale", type=float, default=1.0, help="LAVA noise scale")
+
+    # Wandb Settings
+    parser.add_argument("--wandb_project", type=str, default="ViT-ImageClassification", help="Wandb project name")
+    parser.add_argument("--no_wandb", action="store_true", help="Disable wandb logging")
 
     args = parser.parse_args()
     setup_seed(args.seed)

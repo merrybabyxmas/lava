@@ -326,7 +326,7 @@ class BaseExperimentRunner(ABC):
 
             # 프로세스 완료 대기 (2시간 타임아웃)
             try:
-                process.wait(timeout=7200)
+                process.wait(timeout=1000000000)
             except subprocess.TimeoutExpired:
                 process.kill()
                 stdout_thread.join(timeout=5)

@@ -28,7 +28,7 @@ PARAM="all"  # vib / logit_stab / latent_stab / all
 # Training Parameters
 LR=1e-4
 BATCH_SIZE=32
-EPOCHS=30
+EPOCHS=2
 
 # LoRA Parameters
 R=8
@@ -44,7 +44,7 @@ WANDB_PROJECT="IMG-Ablation"
 
 TEST_MODE=false
 
-cd /home/dongwoo39/LAVA
+cd /home/dongwoo43/lava
 
 echo "============================================================"
 echo " Image Classification Ablation 실험"
