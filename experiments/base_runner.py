@@ -531,6 +531,30 @@ IMG_ABLATION_CSV_COLUMNS = [
     "dtd", "eurosat", "gtsrb", "resisc45", "sun397", "svhn", "avg"
 ]
 
+# ============================================================
+# Commonsense Reasoning 태스크 설정
+# ============================================================
+COMMONSENSE_TASKS = [
+    "piqa",
+    "siqa",
+    "arc_easy",
+    "arc_challenge",
+    "openbookqa",
+    "hellaswag",
+    "winogrande"
+]
+
+COMMONSENSE_CSV_COLUMNS = [
+    "method", "params(%)",
+    "piqa", "siqa", "arc_easy", "arc_challenge", 
+    "openbookqa", "hellaswag", "winogrande", "avg"
+]
+
+COMMONSENSE_ABLATION_CSV_COLUMNS = [
+    "seed", "vib", "logit stab / latent stab",
+    "piqa", "siqa", "arc_easy", "arc_challenge",
+    "openbookqa", "hellaswag", "winogrande", "avg"
+]
 
 # ============================================================
 # 비교 메소드 목록

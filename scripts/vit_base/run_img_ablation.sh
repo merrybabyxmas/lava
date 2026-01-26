@@ -86,6 +86,7 @@ else
         --lambda_vib $LAMBDA_VIB \
         --lambda_latent_stab $LAMBDA_LATENT_STAB \
         --wandb_project "$WANDB_PROJECT"
+        
 fi
 
 echo "결과는 outputs/ 폴더에 저장됩니다."
