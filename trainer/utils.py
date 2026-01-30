@@ -15,6 +15,8 @@ import peft.mapping
 from peft.utils.peft_types import PeftType
 from peft.tuners.lava.config import LavaConfig
 from peft.tuners.lava.model import LavaModel
+from peft.tuners.lava_fullweight.config import LavaFullWeightConfig
+from peft.tuners.lava_fullweight.model import LavaFullWeightModel
 
 
 def setup_seed(seed: int):
@@ -32,7 +34,14 @@ def setup_seed(seed: int):
         from peft.tuners.lava.layer import LavaAdapter
         LavaAdapter.set_global_seed(seed)
     except ImportError:
-        pass  # LAVA가 등록되지 않은 경우 무시
+        pass
+
+    # LavaFullWeightAdapter의 global seed 설정
+    try:
+        from peft.tuners.lava_fullweight.layer import LavaFullWeightAdapter
+        LavaFullWeightAdapter.set_global_seed(seed)
+    except ImportError:
+        pass
 
 
 def reset_lava_generators(model, seed: int = None):
@@ -46,7 +55,8 @@ def reset_lava_generators(model, seed: int = None):
         pass
 
 def register_lava():
-    """LAVA를 PEFT 매핑에 등록"""
+    """LAVA 및 LAVA_FULLWEIGHT를 PEFT 매핑에 등록"""
+    # LAVA 등록
     if not hasattr(PeftType, "LAVA"):
         PeftType.LAVA = "LAVA"
 
@@ -55,6 +65,16 @@ def register_lava():
         peft.mapping.PEFT_TYPE_TO_TUNER_MAPPING[lava_key] = LavaModel
         peft.utils.save_and_load.PEFT_TYPE_TO_PREFIX_MAPPING[lava_key] = "adapter_model"
         peft.mapping.PEFT_TYPE_TO_PREFIX_MAPPING[lava_key] = "adapter_model"
+
+    # LAVA_FULLWEIGHT 등록
+    if not hasattr(PeftType, "LAVA_FULLWEIGHT"):
+        PeftType.LAVA_FULLWEIGHT = "LAVA_FULLWEIGHT"
+
+    for lava_fw_key in ["LAVA_FULLWEIGHT", PeftType.LAVA_FULLWEIGHT]:
+        peft.mapping.PEFT_TYPE_TO_CONFIG_MAPPING[lava_fw_key] = LavaFullWeightConfig
+        peft.mapping.PEFT_TYPE_TO_TUNER_MAPPING[lava_fw_key] = LavaFullWeightModel
+        peft.utils.save_and_load.PEFT_TYPE_TO_PREFIX_MAPPING[lava_fw_key] = "adapter_model"
+        peft.mapping.PEFT_TYPE_TO_PREFIX_MAPPING[lava_fw_key] = "adapter_model"
 
 
 class BestMetricCallback(TrainerCallback):

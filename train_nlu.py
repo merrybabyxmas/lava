@@ -45,7 +45,7 @@ register_lava()
 # ==========================================================
 # Adapter builder (MODIFIED: Added AdaLoRA, BitFit)
 # ==========================================================
-def build_adapter(adapter_type, r, alpha, model=None):
+def build_adapter(adapter_type, r, alpha, model=None, total_step=None):
     at = adapter_type.lower()
 
     # 1. LoRA 계열 (LoRA, DoRA, PiSSA)
@@ -65,10 +65,12 @@ def build_adapter(adapter_type, r, alpha, model=None):
     # 2. AdaLoRA
     if at == "adalora":
         return AdaLoraConfig(
-            r=r,
+            init_r=r,
+            target_r=r // 2,
             lora_alpha=alpha,
             target_modules=["query_proj", "key_proj", "value_proj", "dense"],
             task_type="SEQ_CLS",
+            total_step=total_step if total_step else 1000,
         )
 
     # 3. LAVA
@@ -99,7 +101,7 @@ def main(args):
     main_metric = meta["main"]
     eval_key = meta["eval_key"]
     
-    raw = load_dataset("glue", task)
+    raw = load_dataset("nyu-mll/glue", task)
     tokenizer = AutoTokenizer.from_pretrained(args.model)
 
     def preprocess(batch):
@@ -169,9 +171,11 @@ def main(args):
         # 일반 LoRA 계열은 기존 방식(cfg 또는 r*2) 유지
         final_alpha = cfg.get("alpha", args.r)
 
+    # AdaLoRA용 total_step 계산
+    total_step = (total_train_samples // batch) * epochs
 
     # Adapter 적용
-    peft_cfg = build_adapter(adapter_type, r=args.r, alpha=final_alpha)
+    peft_cfg = build_adapter(adapter_type, r=args.r, alpha=final_alpha, total_step=total_step)
     
     
     
@@ -226,8 +230,25 @@ def main(args):
     
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     all_params = sum(p.numel() for p in model.parameters())
-    trainable_percentage = 100 * trainable_params / all_params   
+    frozen_params = all_params - trainable_params
+    trainable_percentage = 100 * trainable_params / all_params
+
+    # Count adapter modules and calculate params per adapter
+    num_adapter_modules = 0
+    adapter_only_params = 0
+    for name, module in model.named_modules():
+        # PEFT adapter layers (LoRA, LAVA, etc.)
+        if hasattr(module, 'lora_A') or hasattr(module, 'W_mu'):
+            num_adapter_modules += 1
+            # Count params in this adapter module
+            for p in module.parameters():
+                if p.requires_grad:
+                    adapter_only_params += p.numel()
+
+    params_per_adapter = adapter_only_params / num_adapter_modules if num_adapter_modules > 0 else 0
+
     print(f"trainable params: {trainable_params:,} || all params: {all_params:,} || trainable%: {trainable_percentage:.4f}")
+    print(f"adapter modules: {num_adapter_modules} || params per adapter: {params_per_adapter:,.0f}")
     
     metric = load_metric("glue", task)
     
@@ -259,9 +280,15 @@ def main(args):
             name=run_name,
             config=vars(args)
         )
+        # Parameter metrics
         wandb.run.summary["trainable_params"] = trainable_params
         wandb.run.summary["all_params"] = all_params
+        wandb.run.summary["frozen_params"] = frozen_params
         wandb.run.summary["trainable_percentage"] = trainable_percentage
+        wandb.run.summary["num_adapter_modules"] = num_adapter_modules
+        wandb.run.summary["adapter_only_params"] = adapter_only_params
+        wandb.run.summary["params_per_adapter"] = params_per_adapter
+        # Data metrics
         wandb.run.summary["total_train_samples"] = total_train_samples
         wandb.run.summary["original_train_size"] = original_train_size
         wandb.run.summary["train_data_ratio"] = args.train_data_ratio

@@ -31,6 +31,7 @@ import wandb
 
 from peft import get_peft_model, LoraConfig, AdaLoraConfig
 from peft.tuners.lava.config import LavaConfig
+from peft.tuners.lava_fullweight.config import LavaFullWeightConfig
 
 from trainer import LavaViTTrainer, setup_seed, register_lava, BestMetricCallback
 
@@ -193,6 +194,9 @@ def build_adapter(adapter_type, r=8, alpha=8, total_step=None):
     if at == "lava":
         return LavaConfig(r=r, alpha=alpha, target_modules=target_modules)
 
+    if at == "lava_fullweight":
+        return LavaFullWeightConfig(r=r, alpha=alpha, target_modules=target_modules)
+
     if at == "bitfit":
         return "bitfit"
 
@@ -349,14 +353,30 @@ def main(args):
 
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in model.parameters())
+    frozen = total - trainable
+
+    # Count adapter modules and calculate params per adapter
+    num_adapter_modules = 0
+    adapter_only_params = 0
+    for name, module in model.named_modules():
+        # PEFT adapter layers (LoRA, LAVA, etc.)
+        if hasattr(module, 'lora_A') or hasattr(module, 'W_mu'):
+            num_adapter_modules += 1
+            # Count params in this adapter module
+            for p in module.parameters():
+                if p.requires_grad:
+                    adapter_only_params += p.numel()
+
+    params_per_adapter = adapter_only_params / num_adapter_modules if num_adapter_modules > 0 else 0
 
     print("=" * 60)
     print(f"[CONFIG] Task: {task} | Adapter: {adapter_type}")
     print(f"[CONFIG] Seed: {args.seed} | Epochs: {epochs} | Batch: {batch} | LR: {lr}")
     print(f"[CONFIG] Rank: {args.r} | Alpha: {args.alpha}")
-    if adapter_type == "lava":
+    if adapter_type in ["lava", "lava_fullweight"]:
         print(f"[CONFIG] Lambda VIB: {args.lambda_vib} | Latent: {args.lambda_latent_stability}")
     print(f"[MODEL] Trainable: {trainable:,} / {total:,} ({100*trainable/total:.4f}%)")
+    print(f"[MODEL] Adapter modules: {num_adapter_modules} | Params per adapter: {params_per_adapter:,.0f}")
     print(f"[DATA] Train: {len(train_ds)} | Val: {len(val_ds)}")
     print("=" * 60)
 
@@ -384,9 +404,14 @@ def main(args):
         wandb.run.summary["total_train_samples"] = total_train_samples
         wandb.run.summary["original_train_size"] = original_train_size
         wandb.run.summary["train_data_ratio"] = args.train_data_ratio
+        # Parameter metrics
         wandb.run.summary["trainable_params"] = trainable
         wandb.run.summary["all_params"] = total
+        wandb.run.summary["frozen_params"] = frozen
         wandb.run.summary["trainable_percentage"] = 100 * trainable / total
+        wandb.run.summary["num_adapter_modules"] = num_adapter_modules
+        wandb.run.summary["adapter_only_params"] = adapter_only_params
+        wandb.run.summary["params_per_adapter"] = params_per_adapter
 
     tmp_dir = tempfile.mkdtemp()
 
@@ -417,7 +442,7 @@ def main(args):
 
     callback = BestMetricCallback("accuracy")
 
-    if adapter_type == "lava":
+    if adapter_type in ["lava", "lava_fullweight"]:
         trainer = LavaViTTrainer(
             model=model,
             args=training_args,
@@ -457,10 +482,10 @@ def main(args):
     os.makedirs(result_dir, exist_ok=True)
 
     # LAVA ablation 실험용 파일명 (lambda 값 포함)
-    if adapter_type == "lava":
+    if adapter_type in ["lava", "lava_fullweight"]:
         result_file = os.path.join(
             result_dir,
-            f"img_result_{task}_s{args.seed}_vib{args.lambda_vib}_lat{args.lambda_latent_stability}.json"
+            f"img_result_{adapter_type}_{task}_s{args.seed}_vib{args.lambda_vib}_lat{args.lambda_latent_stability}.json"
         )
     else:
         result_file = os.path.join(
