@@ -18,16 +18,16 @@ export PYTHONUNBUFFERED=1
 # GPU 설정 (병렬 실행)
 
 GPUS="0"           # 사용할 GPU ID (예: "0,1,2,3")
-PER_GPU_TASKS=2      # GPU당 동시 실행 작업 수 (RAM 메모리 절약을 위해 1로 설정)
+PER_GPU_TASKS=      # GPU당 동시 실행 작업 수 (RAM 메모리 절약을 위해 1로 설정)
 
 # 실험 설정
 # SEEDS="1,2,42"
-SEEDS="1,2"
+SEEDS="33, 67, 16, 97, 71"
 
 # TASKS="dtd,eurosat,gtsrb,resisc45,sun397,svhn"
 TASKS="dtd,eurosat,gtsrb,resisc45,sun397,svhn"  # 빠른 테스트용
-# METHODS="bitfit,lora,adalora,dora,pissa"
-METHODS="lava"
+METHODS="bitfit,lora,dora,pissa,lava"
+# METHODS="lava"
 
 
 
@@ -47,7 +47,7 @@ LAMBDA_VIB=0.0
 LAMBDA_LATENT_STAB=0.0
 
 # Data Ratio (1-100, percentage of training data to use)
-TRAIN_DATA_RATIO=20
+TRAIN_DATA_RATIO=100
 
 # Wandb 설정
 WANDB_PROJECT="IMG-all-comparison-20percentData"

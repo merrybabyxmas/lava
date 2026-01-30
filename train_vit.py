@@ -173,8 +173,10 @@ def build_adapter(adapter_type, r=8, alpha=8, total_step=None):
     at = adapter_type.lower()
     target_modules = ["query", "key", "value", "dense"]
 
+    # NOTE: task_type="SEQ_CLS" ensures classifier head is trainable via modules_to_save
+    # This is critical for fair comparison - all adapters should train the classifier
     if at in ["lora", "dora", "pissa"]:
-        kwargs = dict(r=r, lora_alpha=alpha, target_modules=target_modules)
+        kwargs = dict(r=r, lora_alpha=alpha, target_modules=target_modules, task_type="SEQ_CLS")
         if at == "pissa":
             kwargs["init_lora_weights"] = "pissa"
         if at == "dora":
@@ -189,6 +191,7 @@ def build_adapter(adapter_type, r=8, alpha=8, total_step=None):
             lora_alpha=alpha,
             target_modules=target_modules,
             total_step=total_step if total_step else 1000,
+            task_type="SEQ_CLS",  # Ensure classifier is trainable
         )
 
     if at == "lava":
