@@ -202,10 +202,10 @@ def build_adapter(adapter_type, r=8, alpha=8, total_step=None, lora_dropout=0.0)
         )
 
     if at == "lava":
-        return LavaConfig(r=r, alpha=alpha, target_modules=target_modules)
+        return LavaConfig(r=r, alpha=alpha, target_modules=target_modules, lora_dropout=lora_dropout)
 
     if at == "lava_fullweight":
-        return LavaFullWeightConfig(r=r, alpha=alpha, target_modules=target_modules)
+        return LavaFullWeightConfig(r=r, alpha=alpha, target_modules=target_modules, lora_dropout=lora_dropout)
 
     if at == "bitfit":
         return "bitfit"
