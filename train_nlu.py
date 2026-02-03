@@ -82,6 +82,7 @@ def build_adapter(adapter_type, r, alpha, model=None, total_step=None, lora_drop
             alpha=alpha,
             target_modules=["query_proj", "key_proj", "value_proj", "dense"],
             task_type="SEQ_CLS",
+            lora_dropout=lora_dropout,
         )
 
     # 4. BitFit

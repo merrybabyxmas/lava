@@ -34,7 +34,9 @@ class LavaBaseTrainer(Trainer):
 
     def _cache_lava_layers(self):
         self.lava_layers = []
-        for m in self.model.modules():
+        # DataParallel/DistributedDataParallel 래핑 처리
+        model = self.model.module if hasattr(self.model, 'module') else self.model
+        for m in model.modules():
             # LavaAdapter의 고유 속성 존재 여부 확인
             if hasattr(m, "_last_mu") and hasattr(m, "_last_logvar"):
                 self.lava_layers.append(m)
@@ -53,6 +55,7 @@ class LavaBaseTrainer(Trainer):
     def compute_task_loss(self, logits, labels):
         return F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
 
+
     def compute_loss(self, model, inputs, return_outputs=False):
         if not model.training:
             return super().compute_loss(model, inputs, return_outputs)
@@ -61,53 +64,60 @@ class LavaBaseTrainer(Trainer):
         inputs = self._get_task_specific_inputs(inputs)
         labels = inputs["labels"]
 
-        # [3] Single-pass Forward (N 배치)
+        # [1] Forward Pass
         outputs = model(**inputs)
         logits = outputs.logits
         task_loss = self.compute_task_loss(logits, labels)
 
-        # [4] Vectorized Loss 수집
-        mus, logvars, latent_stabs = [], [], []
+        # [2] KL Annealing Factor 계산 (Linear Scheduler 예시)
+        # 전체 학습 스텝의 10~30% 지점까지 0에서 1로 증가시킵니다.
+        total_steps = self.state.max_steps if self.state.max_steps > 0 else 1000 # fallback
+        warmup_steps = int(total_steps * 0.2) # 전체의 20% 동안 annealing
+        
+        current_step = self.state.global_step
+        # 0에서 1 사이의 ratio 계산
+        annealing_factor = min(1.0, current_step / warmup_steps) if warmup_steps > 0 else 1.0
+        
+        # 현재 스텝에 적용될 lambda_vib
+        current_lambda_vib = self.lambda_vib * annealing_factor
 
+        # [3] VIB & Stability Loss 수집 (기존 로직 동일)
+        mus, logvars, latent_stabs = [], [], []
         for layer in self.lava_layers:
             if layer._last_mu is not None:
                 mus.append(layer._last_mu)
                 logvars.append(layer._last_logvar)
-                layer._last_mu = None # 메모리 비우기
+                layer._last_mu = None
                 layer._last_logvar = None
-
             if layer._latent_stability is not None:
                 latent_stabs.append(layer._latent_stability)
                 layer._latent_stability = None
 
         # VIB Loss (KL) 계산
         if mus:
-            # Flatten each mu/logvar to 2D [N, rank] before concat
-            # (handles different sequence lengths across layers)
             flattened_mus = [mu.view(-1, mu.size(-1)) for mu in mus]
             flattened_logvars = [lv.view(-1, lv.size(-1)) for lv in logvars]
             all_mus = torch.cat(flattened_mus, dim=0)
             all_logvars = torch.cat(flattened_logvars, dim=0)
+            # KL Divergence: 0.5 * sum(mu^2 + exp(logvar) - logvar - 1)
             vib_loss = -0.5 * torch.mean(1 + all_logvars - all_mus.pow(2) - all_logvars.exp())
         else:
             vib_loss = torch.tensor(0.0, device=task_loss.device)
 
-        # Latent Stability Loss 계산
         if latent_stabs:
             latent_loss = torch.stack(latent_stabs).mean()
         else:
             latent_loss = torch.tensor(0.0, device=task_loss.device)
 
-        # [5] 하이퍼파라미터 가중치 적용 (Fixed)
-        loss = task_loss + (self.lambda_vib * vib_loss) + (self.lambda_latent_stability * latent_loss)
+        # [4] Annealing Factor가 적용된 최종 Loss 계산
+        loss = task_loss + (current_lambda_vib * vib_loss) + (self.lambda_latent_stability * latent_loss)
 
-        # 로깅 데이터 업데이트
+        # 로깅 업데이트
         self.loss_track.update({
             "task_loss": task_loss.item(),
             "vib_raw": vib_loss.item(),
-            "latent_stab_raw": latent_loss.item(),
-            "lambda_vib_val": self.lambda_vib,
-            "lambda_latent_val": self.lambda_latent_stability,
+            "annealing_factor": annealing_factor,
+            "current_lambda_vib": current_lambda_vib,
         })
 
         return (loss, outputs) if return_outputs else loss

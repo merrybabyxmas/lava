@@ -102,11 +102,11 @@ IMG_TASK_CONFIG = {
 
 
 # ============================================================
-# Torchvision Dataset Loader
+# Torchvision Dataset Loader (with HF Dataset caching)
 # ============================================================
 def load_torchvision_dataset(task: str, meta: dict, data_root: str = "./data", seed: int = 42):
     """
-    Torchvision 데이터셋을 HuggingFace Dataset 형식으로 변환
+    Torchvision 데이터셋을 HuggingFace Dataset 형식으로 변환 (캐시 지원)
 
     Args:
         task: 태스크 이름
@@ -114,6 +114,19 @@ def load_torchvision_dataset(task: str, meta: dict, data_root: str = "./data", s
         data_root: 데이터 저장 경로
         seed: random_split에 사용할 시드 (재현성 보장)
     """
+    # 캐시 디렉토리 설정
+    cache_base = os.path.join(os.path.dirname(__file__), ".cache", task, "hf_dataset")
+    train_cache_path = os.path.join(cache_base, "train")
+    val_cache_path = os.path.join(cache_base, "test")
+
+    # 캐시가 있으면 바로 로드 (DTD 등 고해상도 데이터셋 변환 시간 절약)
+    if os.path.exists(train_cache_path) and os.path.exists(val_cache_path):
+        print(f"[*] Loading cached HF dataset from {cache_base}")
+        train_hf = Dataset.load_from_disk(train_cache_path)
+        val_hf = Dataset.load_from_disk(val_cache_path)
+        return {"train": train_hf, "test": val_hf}
+
+    print(f"[*] Converting torchvision dataset to HF format (this may take a while for {task})...")
     tv_class = meta["tv_class"]
 
     # DTD는 split 파라미터 사용
@@ -128,17 +141,17 @@ def load_torchvision_dataset(task: str, meta: dict, data_root: str = "./data", s
     elif task == "svhn":
         train_ds = tv_class(root=data_root, split="train", download=True)
         val_ds = tv_class(root=data_root, split="test", download=True)
-    # EuroSAT, SUN397는 train 파라미터 사용
-    elif task in ["eurosat", "sun397"]:
+    # EuroSAT는 train 파라미터 사용
+    elif task == "eurosat":
         # 전체 데이터셋 로드 후 분할
         full_ds = tv_class(root=data_root, download=True)
-        # 80/20 split
+        # 80/20 split (고정 시드 사용)
         total_len = len(full_ds)
         train_len = int(0.8 * total_len)
         val_len = total_len - train_len
         train_ds, val_ds = torch.utils.data.random_split(
             full_ds, [train_len, val_len],
-            generator=torch.Generator().manual_seed(seed)  
+            generator=torch.Generator().manual_seed(42)  # 캐시 일관성을 위해 고정 시드
         )
     else:
         raise ValueError(f"Unknown task: {task}")
@@ -165,6 +178,12 @@ def load_torchvision_dataset(task: str, meta: dict, data_root: str = "./data", s
 
     train_hf = convert_to_hf_dataset(train_ds)
     val_hf = convert_to_hf_dataset(val_ds)
+
+    # 캐시로 저장
+    os.makedirs(cache_base, exist_ok=True)
+    train_hf.save_to_disk(train_cache_path)
+    val_hf.save_to_disk(val_cache_path)
+    print(f"[*] Saved HF dataset cache to {cache_base}")
 
     return {"train": train_hf, "test": val_hf}
 
@@ -202,10 +221,10 @@ def build_adapter(adapter_type, r=8, alpha=8, total_step=None, lora_dropout=0.0)
         )
 
     if at == "lava":
-        return LavaConfig(r=r, alpha=alpha, target_modules=target_modules)
+        return LavaConfig(r=r, alpha=alpha, target_modules=target_modules, lora_dropout=lora_dropout)
 
     if at == "lava_fullweight":
-        return LavaFullWeightConfig(r=r, alpha=alpha, target_modules=target_modules)
+        return LavaFullWeightConfig(r=r, alpha=alpha, target_modules=target_modules, lora_dropout=lora_dropout)
 
     if at == "bitfit":
         return "bitfit"
